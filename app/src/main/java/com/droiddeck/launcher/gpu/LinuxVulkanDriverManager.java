@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.zip.ZipEntry;
@@ -37,7 +38,7 @@ import java.util.zip.ZipInputStream;
  * <p>Layout (under the app's files dir, which the session sees by its full host path):
  * <pre>
  *   files/linux_vulkan_drivers/&lt;id&gt;/
- *       libvulkan_freedreno.so   the driver
+ *       libvulkan_&lt;vendor&gt;.so  the driver, under the name it arrived with
  *       icd.json                 generated Vulkan ICD manifest; library_path = the .so's ABSOLUTE path
  *       meta.json                name / driverVersion / minGlibc, our own schema
  * </pre>
@@ -49,9 +50,44 @@ import java.util.zip.ZipInputStream;
 public class LinuxVulkanDriverManager {
     private static final String TAG = "LinuxVulkanDriver";
     public static final String DIR_NAME = "linux_vulkan_drivers";
-    public static final String LIB_NAME = "libvulkan_freedreno.so";
     public static final String ICD_NAME = "icd.json";
     public static final String META_NAME = "meta.json";
+    /** The loader's own floor, used when a zip's manifest states no api_version. */
+    private static final String API_DEFAULT = "1.1.274";
+    /** Only for a driver that arrived without a .so name, which {@link #adopt} refuses. */
+    private static final String LIB_DEFAULT_NAME = "libvulkan_freedreno.so";
+    /** The zip's own ICD manifest names, whose api_version the generated one carries over. */
+    private static final List<String> ICD_NAMES = Collections.unmodifiableList(Arrays.asList(
+            "freedreno_icd.aarch64.json", "panfrost_icd.aarch64.json", "panvk_icd.aarch64.json",
+            "lvp_icd.aarch64.json"));
+
+    /**
+     * The driver libraries this importer accepts, by the name they ship under: Turnip for Adreno,
+     * PanVK for Mali, and lavapipe for a GPU with no working hardware driver at all. Which one a
+     * zip carries decides what it is, so the list is what separates a runtime driver from the
+     * AdrenoTools and Wayland zips that are refused above.
+     */
+    private static final List<String> LIB_PREFIXES = Collections.unmodifiableList(Arrays.asList(
+            "libvulkan_freedreno", "libvulkan_panvk", "libvulkan_panfrost", "libvulkan_lvp"));
+
+    /** True when {@code name} is one of the runtime driver libraries in {@link #LIB_PREFIXES}. */
+    public static boolean isRuntimeDriverName(String name) {
+        if (name == null || !name.endsWith(".so")) return false;
+        for (String prefix : LIB_PREFIXES) if (name.startsWith(prefix)) return true;
+        return false;
+    }
+
+    /**
+     * A runtime driver is installed under the name it arrived with, so the device report and the
+     * session logs say {@code libvulkan_panvk.so} rather than claiming a Turnip that is not there.
+     */
+    static String installedLibraryName(File dir) {
+        File[] files = dir.listFiles();
+        if (files != null) {
+            for (File file : files) if (file.isFile() && isRuntimeDriverName(file.getName())) return file.getName();
+        }
+        return null;
+    }
 
     private final Context context;
     private final File rootDir;
@@ -70,7 +106,7 @@ public class LinuxVulkanDriverManager {
     public boolean isInstalled(String id) {
         if (id == null || id.isEmpty() || id.contains("/") || id.contains("..")) return false;
         File dir = getDriverDir(id);
-        return new File(dir, LIB_NAME).isFile() && new File(dir, ICD_NAME).isFile();
+        return installedLibraryName(dir) != null && new File(dir, ICD_NAME).isFile();
     }
 
     /** Absolute path of the driver's ICD manifest, or null when the id isn't installed. */
@@ -131,6 +167,7 @@ public class LinuxVulkanDriverManager {
         boolean keep = false;
         try {
             String soName = null;
+            String apiVersion = null;
             JSONObject zipMeta = null;
             try (InputStream is = context.getContentResolver().openInputStream(zipUri);
                  ZipInputStream zis = new ZipInputStream(is)) {
@@ -141,11 +178,24 @@ public class LinuxVulkanDriverManager {
                     // Flatten: only the base name matters, and it also defeats zip-slip paths.
                     String base = new File(entry.getName()).getName();
                     if (base.isEmpty()) continue;
-                    if (base.startsWith("libvulkan_freedreno") && base.endsWith(".so")) {
-                        if (soName != null) Log.w(TAG, "zip has several libvulkan_freedreno*.so; using the first (" + soName + ")");
+                    if (isRuntimeDriverName(base)) {
+                        if (soName != null) Log.w(TAG, "zip has several Vulkan drivers; using the first (" + soName + ")");
                         else {
-                            Files.copy(zis, new File(tmpDir, LIB_NAME).toPath(), StandardCopyOption.REPLACE_EXISTING);
+                            Files.copy(zis, new File(tmpDir, base).toPath(), StandardCopyOption.REPLACE_EXISTING);
                             soName = base;
+                        }
+                    } else if (ICD_NAMES.contains(base)) {
+                        // The manifest itself is dropped (its library_path is relative to itself,
+                        // and adopt() writes an absolute one), but the api_version it declares is
+                        // the driver's own: Turnip answers 1.1, PanVK answers 1.4, and a manifest
+                        // that understates it makes the loader ignore the driver.
+                        try {
+                            JSONObject declared = new JSONObject(new String(readAll(zis), StandardCharsets.UTF_8))
+                                    .optJSONObject("ICD");
+                            String version = declared == null ? null : declared.optString("api_version");
+                            if (version != null && !version.isEmpty()) apiVersion = version;
+                        } catch (Exception e) {
+                            Log.w(TAG, base + " unreadable, using the default api_version");
                         }
                     } else if (base.equals(META_NAME)) {
                         try {
@@ -158,7 +208,7 @@ public class LinuxVulkanDriverManager {
                     // library_path is relative to itself, and adopt() writes an absolute one.
                 }
             }
-            String id = adopt(tmpDir, soName, zipMeta, displayName);
+            String id = adopt(tmpDir, soName, zipMeta, displayName, apiVersion);
             keep = true;
             return id;
         } finally {
@@ -180,11 +230,16 @@ public class LinuxVulkanDriverManager {
      * deletes {@code tmpDir} when this throws.
      */
     String adopt(File tmpDir, String soName, JSONObject zipMeta, String displayName) throws IOException {
+        return adopt(tmpDir, soName, zipMeta, displayName, null);
+    }
+
+    String adopt(File tmpDir, String soName, JSONObject zipMeta, String displayName, String apiVersion)
+            throws IOException {
         try {
             if (soName == null) {
                 throw new IllegalArgumentException(context.getString(R.string.lvd_no_library));
             }
-            File so = new File(tmpDir, LIB_NAME);
+            File so = new File(tmpDir, soName);
             if (!isAarch64Elf(so)) {
                 throw new IllegalArgumentException(context.getString(R.string.lvd_not_aarch64, soName));
             }
@@ -214,8 +269,10 @@ public class LinuxVulkanDriverManager {
             JSONObject icd = new JSONObject();
             icd.put("file_format_version", "1.0.0");
             JSONObject icdBody = new JSONObject();
-            icdBody.put("library_path", new File(dir, LIB_NAME).getAbsolutePath());
-            icdBody.put("api_version", "1.1.274");
+            // The library is still in the staging dir; only its name and the final path matter here.
+            String installedAs = soName != null ? soName : LIB_DEFAULT_NAME;
+            icdBody.put("library_path", new File(dir, installedAs).getAbsolutePath());
+            icdBody.put("api_version", apiVersion != null && !apiVersion.isEmpty() ? apiVersion : API_DEFAULT);
             icd.put("ICD", icdBody);
             if (!FileUtils.writeString(new File(tmpDir, ICD_NAME), icd.toString(2))) throw new IOException("cannot write icd.json");
 

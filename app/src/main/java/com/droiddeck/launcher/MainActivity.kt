@@ -1669,10 +1669,11 @@ class MainActivity : ComponentActivity() {
             Thread({ checkCatalog() }, "catalog").start()
             return
         }
-        // The runtime draws with Turnip, an Adreno driver: on Mali, Xclipse or PowerVR the
-        // compositor gets no usable Vulkan device and a session is sound over a black screen.
-        // Said before the download, not after it; the user may still go ahead.
-        if (installed == null && !com.droiddeck.launcher.core.DeviceSupport.adreno()) { showNonAdreno = release; return }
+        // The runtime draws with a Vulkan driver, and which one is the GPU vendor's business:
+        // Turnip for an Adreno, PanVK or the vendor ICD for a Mali. On a GPU the app has no
+        // driver for at all the compositor gets no usable Vulkan device and a session is sound
+        // over a black screen. Said before the download, not after it; the user may go ahead.
+        if (installed == null && !com.droiddeck.launcher.core.DeviceSupport.supported()) { showNonAdreno = release; return }
         install(release)
     }
 
@@ -1684,7 +1685,7 @@ class MainActivity : ComponentActivity() {
             showPhantomGate = true
             return false
         }
-        val warn = installed == null && !com.droiddeck.launcher.core.DeviceSupport.adreno()
+        val warn = installed == null && !com.droiddeck.launcher.core.DeviceSupport.supported()
         if (warn && available != null) { showNonAdreno = available; return false }
         startActivity(intent)
         return true

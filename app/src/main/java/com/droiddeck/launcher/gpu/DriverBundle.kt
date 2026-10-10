@@ -18,8 +18,8 @@ import java.util.zip.ZipInputStream
  *
  * ```
  * manifest.json   {"package", "version", "drivers": {"android": {"path"}, "linux": {"path"}}}
- * android/        meta.json (AdrenoTools) + libvulkan_freedreno.so
- * linux/          meta.json + libvulkan_freedreno.so
+ * android/        meta.json (AdrenoTools) + libvulkan_<vendor>.so
+ * linux/          meta.json + libvulkan_<vendor>.so
  * ```
  *
  * Installing one puts each half through its own importer, with that importer's checks, and
@@ -100,11 +100,16 @@ object DriverBundle {
 
             val linuxStage = lm.newStagingDir()
             val linuxId = try {
-                val library = linuxDir.listFiles()?.firstOrNull { it.isFile && it.name.startsWith("libvulkan_freedreno") && it.name.endsWith(".so") }
-                library?.copyTo(File(linuxStage, LinuxVulkanDriverManager.LIB_NAME))
+                val library = linuxDir.listFiles()?.firstOrNull {
+                    it.isFile && LinuxVulkanDriverManager.isRuntimeDriverName(it.name)
+                }
+                library?.copyTo(File(linuxStage, library.name))
                 val meta = File(linuxDir, LinuxVulkanDriverManager.META_NAME).takeIf { it.isFile }
                     ?.let { runCatching { JSONObject(FileUtils.readString(it)) }.getOrNull() }
-                lm.adopt(linuxStage, library?.name, meta, manifest.name)
+                val apiVersion = linuxDir.listFiles()?.firstOrNull {
+                    it.isFile && it.name.endsWith(".json") && it.name.contains("icd")
+                }?.let { runCatching { JSONObject(FileUtils.readString(it)).getJSONObject("ICD").optString("api_version") }.getOrNull() }
+                lm.adopt(linuxStage, library?.name, meta, manifest.name, apiVersion)
             } catch (e: Exception) {
                 FileUtils.delete(linuxStage)
                 throw e

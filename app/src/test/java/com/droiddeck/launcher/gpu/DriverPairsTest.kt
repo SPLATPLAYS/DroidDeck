@@ -22,7 +22,24 @@ class DriverPairsTest {
         assertEquals(Family.A7XX, GpuInfo.familyOf(true, 740))
         assertEquals(Family.A6XX, GpuInfo.familyOf(true, 610))
         assertEquals(Family.ADRENO_UNKNOWN, GpuInfo.familyOf(true, 0))
-        assertEquals(Family.NOT_ADRENO, GpuInfo.familyOf(false, 0))
+    }
+
+    @Test
+    fun aMaliIsItsOwnFamilyAndNothingElseIs() {
+        assertEquals(Family.MALI, GpuInfo.familyOf(false, 0, GpuInfo.Vendor.MALI))
+        assertEquals(Family.OTHER, GpuInfo.familyOf(false, 0))
+        // An Adreno is an Adreno whichever vendor claims to be found first.
+        assertEquals(Family.A7XX, GpuInfo.familyOf(true, 740, GpuInfo.Vendor.ADRENO))
+    }
+
+    @Test
+    fun aMaliIsExperimentalRatherThanUnsupported() {
+        val mali = GpuInfo("Mali-G715-Immortalis MC7", 0, Family.MALI, "Tensor G3", false,
+            vendor = GpuInfo.Vendor.MALI)
+        assertEquals(GpuInfo.Support.UNTESTED, mali.support)
+        assertTrue(mali.supportText.contains("PanVK"))
+        // Turnip cannot drive it, so the driver lists must not offer a Turnip pair.
+        assertNull(DriverPairs.recommendedKey(mali, emptyList()))
     }
 
     @Test

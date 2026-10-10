@@ -114,8 +114,10 @@ public final class LinuxRuntime {
         File icdDir = new File(rootDir(context), "usr/share/vulkan/icd.d");
         File[] manifests = icdDir.listFiles((dir, name) -> name.endsWith(".json"));
         if (manifests == null) return null;
-        for (File manifest : manifests) {
-            if (manifest.getName().contains("freedreno")) return manifest;
+        for (String driver : new String[]{"freedreno", "panfrost", "panvk", "lvp"}) {
+            for (File manifest : manifests) {
+                if (manifest.getName().contains(driver)) return manifest;
+            }
         }
         return manifests.length > 0 ? manifests[0] : null;
     }

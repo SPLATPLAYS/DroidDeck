@@ -26,6 +26,8 @@ data class GpuInfo(
     val kgslName: String = "",
     /** Where [model] came from: "kernel", "vulkan" or "platform", "" when unknown. */
     val modelSource: String = "",
+    /** Which GPU this is, as the kernel and the Vulkan loader see it. */
+    val vendor: Vendor = Vendor.ADRENO,
 ) {
     enum class Family(val label: String) {
         A8XX("Adreno 8xx"),
@@ -35,17 +37,36 @@ data class GpuInfo(
         A6XX("Adreno 6xx"),
         /** An Adreno whose model KGSL does not give: treated as the newest family it could be. */
         ADRENO_UNKNOWN("Adreno"),
-        NOT_ADRENO("Not an Adreno GPU");
+        /** Arm Mali (Mali-G715 and the rest of the Tensor generations). */
+        MALI("Mali"),
+        /** A GPU from neither vendor: PowerVR, Xclipse, or one the app cannot name. */
+        OTHER("Not an Adreno or Mali GPU");
 
-        /** [label] in the app's language: the Adreno families are names, the rest is words. */
-        fun label(context: Context): String = if (this == NOT_ADRENO) context.getString(R.string.gpuinfo_not_adreno) else label
+        /** [label] in the app's language: the Adreno and Mali families are names, the rest is words. */
+        fun label(context: Context): String = when (this) {
+            OTHER -> context.getString(R.string.gpuinfo_not_adreno)
+            else -> label
+        }
+    }
+
+    /**
+     * The GPU vendor, which is what decides the driver rather than the model: an Adreno needs
+     * Turnip over KGSL, a Mali needs PanVK or the vendor ICD over `mali_kbase`, and neither is a
+     * fallback for the other. [UNKNOWN] covers a GPU the app can neither name nor drive.
+     */
+    enum class Vendor {
+        ADRENO, MALI, UNKNOWN;
+
+        /** True when this vendor's drivers are the AdrenoTools/Turnip ones the app ships. */
+        val adreno: Boolean get() = this == ADRENO
     }
 
     enum class Support { TESTED, UNTESTED, UNSUPPORTED }
 
     val support: Support
         get() = when {
-            family == Family.NOT_ADRENO -> Support.UNSUPPORTED
+            family == Family.OTHER -> Support.UNSUPPORTED
+            family == Family.MALI -> Support.UNTESTED
             family == Family.A6XX && model == 650 -> Support.TESTED
             family == Family.A8XX -> Support.TESTED
             family == Family.A7XX && model >= 725 -> Support.TESTED
@@ -56,15 +77,22 @@ data class GpuInfo(
     val supportText: String
         get() = when (support) {
             Support.TESTED -> "Supported"
-            Support.UNTESTED -> if (family == Family.A7XX_LOW) "Experimental: its drivers are test builds"
-                else "Outside tested hardware (Adreno 650, 725 and newer): it may not run"
-            Support.UNSUPPORTED -> "Not supported: DroidDeck needs an Adreno (Snapdragon) GPU"
+            Support.UNTESTED -> when (family) {
+                Family.A7XX_LOW -> "Experimental: its drivers are test builds"
+                Family.MALI -> "Experimental: needs a PanVK or vendor Vulkan driver, not Turnip"
+                else -> "Outside tested hardware (Adreno 650, 725 and newer): it may not run"
+            }
+            Support.UNSUPPORTED -> "Not supported: DroidDeck needs an Adreno (Snapdragon) or Mali GPU"
         }
 
     /** [supportText] in the app's language. */
     fun supportText(context: Context): String = context.getString(when (support) {
         Support.TESTED -> R.string.gpuinfo_supported
-        Support.UNTESTED -> if (family == Family.A7XX_LOW) R.string.gpuinfo_experimental else R.string.gpuinfo_below_tested
+        Support.UNTESTED -> when (family) {
+            Family.A7XX_LOW -> R.string.gpuinfo_experimental
+            Family.MALI -> R.string.gpuinfo_experimental_mali
+            else -> R.string.gpuinfo_below_tested
+        }
         Support.UNSUPPORTED -> R.string.gpuinfo_unsupported
     })
 
@@ -75,12 +103,42 @@ data class GpuInfo(
         /** [name] when the device names no GPU; English, as the device report shows it. */
         private const val UNNAMED = "this GPU"
 
+        /** The Qualcomm GPU node and the vendor driver that only a Qualcomm stack has. */
+        @JvmStatic
+        fun adrenoPresent(): Boolean =
+            File("/sys/class/kgsl/kgsl-3d0").exists() || File("/vendor/lib64/hw/vulkan.adreno.so").exists()
+
+        /** The kbase node a Mali is driven through; the number is the GPU's, not a fixed 0. */
+        fun maliNode(): String? = File("/sys/class/misc").listFiles()
+            ?.map { it.name }
+            ?.firstOrNull { it.startsWith("mali") && it.substringAfter("mali").all(Char::isDigit) }
+            ?.let { "/dev/$it" }
+            ?: if (File("/dev/mali0").exists()) "/dev/mali0" else null
+
+        fun maliPresent(): Boolean = maliNode() != null ||
+            File("/sys/class/devfreq").listFiles()?.any { it.name.contains("mali", ignoreCase = true) } == true ||
+            systemProperty("ro.hardware.egl").contains("mali", ignoreCase = true)
+
+        /**
+         * The vendor, from what only each vendor's stack has: an Adreno is a KGSL node or
+         * Qualcomm's own Vulkan driver, a Mali is a kbase node or a Mali devfreq node.
+         */
+        fun detectVendor(): Vendor = when {
+            adrenoPresent() -> Vendor.ADRENO
+            maliPresent() -> Vendor.MALI
+            else -> Vendor.UNKNOWN
+        }
+
         fun detect(): GpuInfo {
-            val adreno = File("/sys/class/kgsl/kgsl-3d0").exists() || File("/vendor/lib64/hw/vulkan.adreno.so").exists()
+            val vendor = detectVendor()
+            val adreno = vendor == Vendor.ADRENO
             val raw = listOf("/sys/class/kgsl/kgsl-3d0/gpu_model", "/sys/class/kgsl/kgsl-3d0/gpu_chipid")
                 .firstNotNullOfOrNull { FileUtils.readString(File(it))?.trim()?.takeIf(String::isNotEmpty) }
             // Where vendors put the chip's model, named when it is known: "Snapdragon 8 Gen 2 (QCS8550)".
-            val soc = if (adreno) SocNames.label() else ""
+            val soc = when {
+                adreno -> SocNames.label()
+                else -> socLabel()
+            }
             val fromKernel = raw?.let { threeDigits(it) } ?: 0
             // Some kernels name the GPU without its model (AYANEO's Pocket FIT: "Adreno33v2"). The
             // Vulkan driver's own name, when this process has asked it, then the platform's code
@@ -94,15 +152,30 @@ data class GpuInfo(
                 fromPlatform > 0 -> "platform"
                 else -> ""
             }
-            val family = familyOf(adreno, model)
+            val family = familyOf(adreno, model, vendor)
             val samsung = Build.MANUFACTURER.equals("samsung", ignoreCase = true)
             return GpuInfo(
-                name = if (!adreno) Build.HARDWARE.ifBlank { UNNAMED } else if (model > 0) "Adreno $model" else "Adreno",
-                model = model, family = family, soc = soc,
+                name = nameOf(vendor, model), model = model, family = family, soc = soc,
                 oneUi8Gen2 = samsung && model == 740,
-                kgslName = raw.orEmpty(), modelSource = source,
+                kgslName = raw.orEmpty(), modelSource = source, vendor = vendor,
             )
         }
+
+        /**
+         * The GPU as the screen shows it. An Adreno is named by its model; every other vendor is
+         * named by what the Vulkan driver reports for itself, which is the only place a Mali names
+         * its own model ("Mali-G715-Immortalis MC7").
+         */
+        private fun nameOf(vendor: Vendor, model: Int): String = when (vendor) {
+            Vendor.ADRENO -> if (model > 0) "Adreno $model" else "Adreno"
+            Vendor.MALI -> VulkanInfo.cachedOrNull()?.get("device")?.takeIf { it.isNotBlank() }
+                ?: Build.HARDWARE.ifBlank { UNNAMED }
+            Vendor.UNKNOWN -> Build.HARDWARE.ifBlank { UNNAMED }
+        }
+
+        /** The SoC on a non-Qualcomm chip: Android's own name, which is the only one there is. */
+        private fun socLabel(): String =
+            if (Build.VERSION.SDK_INT >= 31) Build.SOC_MODEL.takeIf { it.isNotBlank() && it != Build.UNKNOWN } ?: "" else ""
 
         private fun threeDigits(text: String): Int = Regex("""(\d{3})""").find(text)?.groupValues?.get(1)?.toIntOrNull() ?: 0
 
@@ -122,8 +195,9 @@ data class GpuInfo(
             ""
         }
 
-        internal fun familyOf(adreno: Boolean, model: Int): Family = when {
-            !adreno -> Family.NOT_ADRENO
+        internal fun familyOf(adreno: Boolean, model: Int, vendor: Vendor = if (adreno) Vendor.ADRENO else Vendor.UNKNOWN): Family = when {
+            vendor == Vendor.MALI -> Family.MALI
+            !adreno -> Family.OTHER
             model == 0 -> Family.ADRENO_UNKNOWN
             model >= 800 -> Family.A8XX
             model in listOf(710, 720, 722) -> Family.A7XX_LOW

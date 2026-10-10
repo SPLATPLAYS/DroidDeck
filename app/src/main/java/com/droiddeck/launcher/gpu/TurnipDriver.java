@@ -25,9 +25,10 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
 /**
- * The Vulkan driver the in-app compositor runs on. It has to be Turnip: the system Adreno driver
- * does not implement VK_EXT_image_drm_format_modifier, so importing the dma-bufs gamescope hands
- * over fails and the session renders nothing. Two builds ship in the apk, one per Adreno
+ * The Vulkan driver the in-app compositor runs on. On an Adreno it has to be Turnip: the system
+ * Adreno driver does not implement VK_EXT_image_drm_format_modifier, so importing the dma-bufs
+ * gamescope hands over fails and the session renders nothing. Two builds ship in the apk, one per
+ * Adreno
  * generation, and the GPU decides which is unpacked - unless the user has imported an AdrenoTools
  * zip of their own and chosen it, which then wins.
  *
@@ -337,6 +338,15 @@ public final class TurnipDriver {
             if (forced.startsWith("system")) return null;
             if (forced.startsWith("a8")) return DRIVER_A8XX;
             if (forced.startsWith("a7")) return DRIVER_A7XX;
+        }
+        // Turnip is an Adreno driver and cannot open a GPU that is not an Adreno: on a Mali the
+        // adrenotools hooks install, the ioctls they issue find no device, and the compositor
+        // enumerates nothing. A non-Adreno therefore takes the null path, which leaves the
+        // compositor on the system Vulkan loader - on a Mali that is the vendor's own ICD, which
+        // does implement the dma-buf import this compositor needs.
+        if (!GpuInfo.adrenoPresent()) {
+            Log.i(TAG, "not an Adreno: using the system Vulkan driver");
+            return null;
         }
         String model = gpuModel();
         Log.i(TAG, "gpu model: " + (model == null ? "unknown" : model));
