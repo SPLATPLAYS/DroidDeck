@@ -45,5 +45,13 @@ library list, before anything is published.
   `GAMESCOPE_FOCUSABLE_WINDOWS`, so the client kept its loading screen over the running game
   (Skyrim SE, A Plague Tale: Innocence, on the games' own Xwayland). MapNotify now refreshes the flag.
 
+- `0120-tolerate-a-vulkan-device-without-drm-nodes.patch` - this project: a driver may
+  implement `VK_EXT_physical_device_drm` and still expose no nodes, which is what a GPU on a
+  proprietary kernel driver does (PanVK over kbase on a Tensor phone: `mali_kbase` registers
+  `/dev/mali0` as a miscellaneous char device and owns no DRM node, and the driver leaves
+  `drm.{render,primary}_rdev` unset). A driver that does not implement the extension at all is
+  already carried along with no DRM fd; one that implements it with empty fields was refused.
+  It now warns and carries on, refusing only when a named node then fails to open.
+
 Sixteen more of Armada's patches are DRM/lease/HDR-on-KMS work for a native display, which this
 app's Wayland-hosted gamescope never reaches, or need a newer gamescope than the runtime has.
