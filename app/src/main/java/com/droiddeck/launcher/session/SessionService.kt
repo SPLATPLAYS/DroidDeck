@@ -30,7 +30,6 @@ import com.droiddeck.launcher.core.CpuCores
 import com.droiddeck.launcher.core.DeviceReport
 import com.droiddeck.launcher.core.DeviceSupport
 import com.droiddeck.launcher.core.HostEnvironment
-import com.droiddeck.launcher.core.DeviceSupport
 import com.droiddeck.launcher.core.SessionLogCapture
 import com.droiddeck.launcher.core.NetworkReport
 import com.droiddeck.launcher.core.SessionPart
