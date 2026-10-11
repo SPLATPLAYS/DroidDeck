@@ -890,7 +890,7 @@ BUSCONF
         done
       ) &
     fi
-    echo "== steam args: ${_bl_ui[*]} ${_bl_cdp[*]} ${_bl_lang[*]} -clientbeta $steam_channel -no-cef-sandbox -cef-force-gpu -cef-ozone-platform=x11 -cef-use-gl=angle -cef-use-angle=vulkan $*"
+    echo "== steam args: ${_bl_ui[*]} ${_bl_cdp[*]} ${_bl_lang[*]} -clientbeta $steam_channel -no-cef-sandbox -cef-force-gpu -cef-ozone-platform=x11 -cef-use-gl=angle -cef-use-angle=gl $*"
     # An update that cannot install asks for a restart (rc=42) every time; the count is capped so a
     # session can never again loop in silence, which reads as a menu opening and closing by itself.
     steam_updates=0
@@ -982,7 +982,7 @@ BUSCONF
       fi
       "$steam_root/steamrtarm64/steam" "${_bl_ui[@]}" "${_bl_cdp[@]}" "${_bl_lang[@]}" -clientbeta "$steam_channel" \
         -no-cef-sandbox -cef-force-gpu -cef-ozone-platform=x11 \
-        -cef-use-gl=angle -cef-use-angle=vulkan "$@"
+        -cef-use-gl=angle -cef-use-angle=gl "$@"
       rc=$?
       if [ -n "$desktop_ui_pid" ]; then
         kill "$desktop_ui_pid" 2>/dev/null || true
